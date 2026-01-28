@@ -45,9 +45,7 @@ async def main():
     bot = Bot(token=cfg.bot_token, parse_mode=ParseMode.MARKDOWN)
     dp = Dispatcher()
 
-    # ВАЖНО:
-    # cfg.admin_chat_id у тебя используется как "админ id".
-    # Оставляю так, чтобы ничего не ломать.
+    # Оставляем твою текущую модель: cfg.admin_chat_id == твой user_id (как ты сказал)
     ADMIN_ID = int(cfg.admin_chat_id)
 
     async def notify_admin(text: str):
@@ -69,8 +67,7 @@ async def main():
         return True
 
     # ========================= ADMIN: GET FILE_ID (ТОЛЬКО ДЛЯ АДМИНА) =========================
-    # 1) Если ТЫ (админ) просто отправил видео/файл/фото боту — бот вернёт file_id.
-    #    Это не сработает для клиентов и НЕ сломает FSM, потому что стоит StateFilter(None).
+    # Если ТЫ (админ) отправил медиа боту в обычном режиме (когда нет FSM-стейта) — бот вернёт file_id.
 
     @dp.message(StateFilter(None), F.from_user.id == ADMIN_ID, F.video)
     async def admin_capture_video_id(m: Message):
@@ -102,7 +99,7 @@ async def main():
             f"{p.file_unique_id}"
         )
 
-    # 2) Команда /getid в ответ на сообщение с медиа — вернёт file_id (тоже только админу).
+    # Команда /getid: ответь на сообщение с медиа → получишь file_id (только админ)
     @dp.message(Command("getid"))
     async def admin_getid_reply(m: Message):
         if m.from_user.id != ADMIN_ID:
@@ -142,15 +139,9 @@ async def main():
         return await m.answer("В reply нет видео/фото/файла. Ответь на медиа и снова /getid.")
 
     # ========================= ADMIN COMMANDS (monitoring + manual send) =========================
+    # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: теперь /video (и /photo) не молчат — показывают ошибку Telegram.
 
-    @dp.message(Command("whoami"))
-async def whoami(m: Message):
-    await m.answer(
-        f"user_id: {m.from_user.id}\n"
-        f"chat_id: {m.chat.id}\n"
-        f"cfg.admin_chat_id: {cfg.admin_chat_id}"
-    
-    )@dp.message(Command("say"))
+    @dp.message(Command("say"))
     async def admin_say(m: Message):
         if m.from_user.id != ADMIN_ID:
             return
@@ -165,26 +156,33 @@ async def whoami(m: Message):
             return await m.answer("user_id должен быть числом. Пример: /say 123456789 привет")
 
         text = parts[2]
-        await bot.send_message(user_id, text)
-        await m.answer("✅ Сообщение отправлено.")
+        try:
+            await bot.send_message(user_id, text)
+            await m.answer("✅ Сообщение отправлено.")
+        except Exception as e:
+            await m.answer(f"❌ Ошибка send_message:\n{type(e).__name__}: {e}")
 
     @dp.message(Command("photo"))
     async def admin_photo(m: Message):
         if m.from_user.id != ADMIN_ID:
             return
 
-        # 1) /photo user_id file_id
         parts = (m.text or "").split(maxsplit=2)
+
+        # 1) /photo user_id file_id
         if len(parts) >= 3:
             try:
                 user_id = int(parts[1])
             except ValueError:
                 return await m.answer("Формат: /photo user_id file_id")
-            file_id = parts[2]
-            await bot.send_photo(chat_id=user_id, photo=file_id)
-            return await m.answer("🖼 Фото отправлено.")
+            file_id = parts[2].strip()
+            try:
+                await bot.send_photo(chat_id=user_id, photo=file_id)
+                return await m.answer("🖼 Фото отправлено.")
+            except Exception as e:
+                return await m.answer(f"❌ Ошибка send_photo:\n{type(e).__name__}: {e}")
 
-        # 2) reply на фото: /photo user_id (в ответе лежит photo.file_id)
+        # 2) reply на фото: /photo user_id
         if not m.reply_to_message or not m.reply_to_message.photo:
             return await m.answer("Формат: /photo user_id file_id ИЛИ ответь командой /photo user_id на фото.")
 
@@ -197,24 +195,32 @@ async def whoami(m: Message):
             return await m.answer("user_id должен быть числом.")
 
         file_id = m.reply_to_message.photo[-1].file_id
-        await bot.send_photo(chat_id=user_id, photo=file_id)
-        await m.answer("🖼 Фото отправлено (из reply).")
+        try:
+            await bot.send_photo(chat_id=user_id, photo=file_id)
+            await m.answer("🖼 Фото отправлено (из reply).")
+        except Exception as e:
+            await m.answer(f"❌ Ошибка send_photo:\n{type(e).__name__}: {e}")
 
     @dp.message(Command("video"))
     async def admin_video(m: Message):
         if m.from_user.id != ADMIN_ID:
             return
 
-        # 1) /video user_id file_id
         parts = (m.text or "").split(maxsplit=2)
+
+        # 1) /video user_id file_id
         if len(parts) >= 3:
             try:
                 user_id = int(parts[1])
             except ValueError:
                 return await m.answer("Формат: /video user_id file_id")
-            file_id = parts[2]
-            await bot.send_video(chat_id=user_id, video=file_id)
-            return await m.answer("🎬 Видео отправлено.")
+            file_id = parts[2].strip()
+
+            try:
+                await bot.send_video(chat_id=user_id, video=file_id)
+                return await m.answer("🎬 Видео отправлено.")
+            except Exception as e:
+                return await m.answer(f"❌ Ошибка send_video:\n{type(e).__name__}: {e}")
 
         # 2) reply на видео: /video user_id
         if not m.reply_to_message or not m.reply_to_message.video:
@@ -229,8 +235,33 @@ async def whoami(m: Message):
             return await m.answer("user_id должен быть числом.")
 
         file_id = m.reply_to_message.video.file_id
-        await bot.send_video(chat_id=user_id, video=file_id)
-        await m.answer("🎬 Видео отправлено (из reply).")
+        try:
+            await bot.send_video(chat_id=user_id, video=file_id)
+            await m.answer("🎬 Видео отправлено (из reply).")
+        except Exception as e:
+            await m.answer(f"❌ Ошибка send_video:\n{type(e).__name__}: {e}")
+
+    # ДОБАВЛЕНО: /doc для случаев, когда видео приходит как DOCUMENT (AgAD...)
+    @dp.message(Command("doc"))
+    async def admin_doc(m: Message):
+        if m.from_user.id != ADMIN_ID:
+            return
+
+        parts = (m.text or "").split(maxsplit=2)
+        if len(parts) < 3:
+            return await m.answer("Формат: /doc user_id file_id")
+
+        try:
+            user_id = int(parts[1])
+        except ValueError:
+            return await m.answer("user_id должен быть числом.")
+
+        file_id = parts[2].strip()
+        try:
+            await bot.send_document(chat_id=user_id, document=file_id)
+            await m.answer("📄 Файл отправлен.")
+        except Exception as e:
+            await m.answer(f"❌ Ошибка send_document:\n{type(e).__name__}: {e}")
 
     # ========================= /start =========================
 
@@ -253,7 +284,7 @@ async def whoami(m: Message):
         await c.message.answer(texts.PREMIUM_PAGE, reply_markup=kb.premium_kb(cfg.manager_username))
         await c.answer()
 
-    @dp.callback_query(F.data == "premium:buy")
+    @dp.callback_query(F.data == "premium:buy"))
     async def premium_buy(c: CallbackQuery):
         db.set_subscription(c.from_user.id, plan="premium", status="pending")
 
@@ -518,7 +549,8 @@ async def whoami(m: Message):
             "📊 Free тест: статистика\n"
             f"User: {safe_username(m.from_user.username)} | id={m.from_user.id}\n"
             f"Day: {day}\n"
-            f"Views: {views}, Likes: {likes}, Comments: {comments}, Follows: {follows}\n"
+            f"Views: {views}, Likes: {likes}, Comments: {comments}\n"
+            f"Follows: {follows}\n"
             f"Post: {post_link}"
         )
 
