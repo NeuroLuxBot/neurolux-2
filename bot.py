@@ -45,11 +45,16 @@ async def main():
     bot = Bot(token=cfg.bot_token, parse_mode=ParseMode.MARKDOWN)
     dp = Dispatcher()
 
+    # ВАЖНО:
+    # cfg.admin_chat_id у тебя используется как "админ id".
+    # Оставляю так, чтобы ничего не ломать.
+    ADMIN_ID = int(cfg.admin_chat_id)
+
     async def notify_admin(text: str):
         # админу шлём без Markdown, чтобы не было "can't parse entities"
         try:
             await bot.send_message(
-                cfg.admin_chat_id,
+                ADMIN_ID,
                 text,
                 parse_mode=None,
                 disable_web_page_preview=True
@@ -63,11 +68,84 @@ async def main():
         logging.exception(f"Unhandled error: {exception}")
         return True
 
+    # ========================= ADMIN: GET FILE_ID (ТОЛЬКО ДЛЯ АДМИНА) =========================
+    # 1) Если ТЫ (админ) просто отправил видео/файл/фото боту — бот вернёт file_id.
+    #    Это не сработает для клиентов и НЕ сломает FSM, потому что стоит StateFilter(None).
+
+    @dp.message(StateFilter(None), F.from_user.id == ADMIN_ID, F.video)
+    async def admin_capture_video_id(m: Message):
+        v = m.video
+        await m.answer(
+            "🎥 VIDEO FILE_ID:\n"
+            f"{v.file_id}\n\n"
+            "🧷 FILE_UNIQUE_ID:\n"
+            f"{v.file_unique_id}"
+        )
+
+    @dp.message(StateFilter(None), F.from_user.id == ADMIN_ID, F.document)
+    async def admin_capture_document_id(m: Message):
+        d = m.document
+        await m.answer(
+            "📄 DOCUMENT FILE_ID:\n"
+            f"{d.file_id}\n\n"
+            "🧷 FILE_UNIQUE_ID:\n"
+            f"{d.file_unique_id}"
+        )
+
+    @dp.message(StateFilter(None), F.from_user.id == ADMIN_ID, F.photo)
+    async def admin_capture_photo_id(m: Message):
+        p = m.photo[-1]
+        await m.answer(
+            "🖼 PHOTO FILE_ID:\n"
+            f"{p.file_id}\n\n"
+            "🧷 FILE_UNIQUE_ID:\n"
+            f"{p.file_unique_id}"
+        )
+
+    # 2) Команда /getid в ответ на сообщение с медиа — вернёт file_id (тоже только админу).
+    @dp.message(Command("getid"))
+    async def admin_getid_reply(m: Message):
+        if m.from_user.id != ADMIN_ID:
+            return
+
+        r = m.reply_to_message
+        if not r:
+            return await m.answer("Формат: ответь командой /getid на сообщение с видео/фото/файлом.")
+
+        if r.video:
+            x = r.video
+            return await m.answer(
+                "🎥 VIDEO FILE_ID:\n"
+                f"{x.file_id}\n\n"
+                "🧷 FILE_UNIQUE_ID:\n"
+                f"{x.file_unique_id}"
+            )
+
+        if r.document:
+            x = r.document
+            return await m.answer(
+                "📄 DOCUMENT FILE_ID:\n"
+                f"{x.file_id}\n\n"
+                "🧷 FILE_UNIQUE_ID:\n"
+                f"{x.file_unique_id}"
+            )
+
+        if r.photo:
+            x = r.photo[-1]
+            return await m.answer(
+                "🖼 PHOTO FILE_ID:\n"
+                f"{x.file_id}\n\n"
+                "🧷 FILE_UNIQUE_ID:\n"
+                f"{x.file_unique_id}"
+            )
+
+        return await m.answer("В reply нет видео/фото/файла. Ответь на медиа и снова /getid.")
+
     # ========================= ADMIN COMMANDS (monitoring + manual send) =========================
 
     @dp.message(Command("say"))
     async def admin_say(m: Message):
-        if m.from_user.id != cfg.admin_chat_id:
+        if m.from_user.id != ADMIN_ID:
             return
 
         parts = (m.text or "").split(maxsplit=2)
@@ -85,7 +163,7 @@ async def main():
 
     @dp.message(Command("photo"))
     async def admin_photo(m: Message):
-        if m.from_user.id != cfg.admin_chat_id:
+        if m.from_user.id != ADMIN_ID:
             return
 
         # 1) /photo user_id file_id
@@ -117,7 +195,7 @@ async def main():
 
     @dp.message(Command("video"))
     async def admin_video(m: Message):
-        if m.from_user.id != cfg.admin_chat_id:
+        if m.from_user.id != ADMIN_ID:
             return
 
         # 1) /video user_id file_id
@@ -183,7 +261,6 @@ async def main():
             "Action: свяжись лично и договорись об оплате/старте."
         )
 
-        # Убрали texts.MANAGER_INSTRUCTION
         await c.message.answer(texts.PREMIUM_REQUEST_SENT, reply_markup=kb.manager_only_kb(cfg.manager_username))
         await c.answer()
 
@@ -244,7 +321,6 @@ async def main():
             "Action: свяжись лично и уточни детали/цену."
         )
 
-        # Убрали texts.MANAGER_INSTRUCTION
         await m.answer(texts.LUX_REQUEST_SENT, reply_markup=kb.manager_only_kb(cfg.manager_username))
         await m.answer("🔙 Возврат в меню:", reply_markup=kb.main_menu(cfg.manager_username))
 
@@ -283,7 +359,6 @@ async def main():
             reply_markup=kb.goal_kb()
         )
 
-    # Кнопка цели
     @dp.callback_query(F.data.startswith("free:goal:"))
     async def free_goal_btn(c: CallbackQuery, state: FSMContext):
         goal = c.data.split("free:goal:", 1)[1]
@@ -297,7 +372,6 @@ async def main():
         )
         await c.answer()
 
-    # Текстовый ввод цели (must-have)
     @dp.message(FreeTestFlow.goal)
     async def free_goal_text(m: Message, state: FSMContext):
         txt = safe_text(m)
@@ -312,7 +386,6 @@ async def main():
             "2) *ссылку текстом* одним сообщением."
         )
 
-    # Материал: только VIDEO или TEXT
     @dp.message(FreeTestFlow.material)
     async def free_material(m: Message, state: FSMContext):
         if m.video:
@@ -335,7 +408,6 @@ async def main():
 
         db.set_test_day(m.from_user.id, 1)
 
-        # мониторинг: исходник получен
         last = db.get_last_test_fields(m.from_user.id)
         await notify_admin(
             "📥 Free тест: исходник получен\n"
@@ -372,10 +444,8 @@ async def main():
         if not link:
             return await m.answer("Пришли ссылку *текстом* (не файлом/стикером).")
 
-        # сохраняем для следующего шага статистики
         await state.update_data(post_link=link)
 
-        # мониторинг: ссылка на пост
         day = db.get_test_day(m.from_user.id)
         await notify_admin(
             "🔗 Free тест: ссылка на пост\n"
@@ -384,9 +454,7 @@ async def main():
             f"Post: {link}"
         )
 
-        # сбрасываем только state (данные остаются)
         await state.set_state(None)
-
         await m.answer("Ссылка сохранена. Теперь введём статистику.", reply_markup=kb.after_posted_kb())
 
     @dp.callback_query(F.data == "free:stats")
@@ -439,7 +507,6 @@ async def main():
 
         db.add_stats(m.from_user.id, day, post_link, views, likes, comments, follows)
 
-        # мониторинг: статистика
         await notify_admin(
             "📊 Free тест: статистика\n"
             f"User: {safe_username(m.from_user.username)} | id={m.from_user.id}\n"
@@ -478,7 +545,6 @@ async def main():
             await m.answer(report)
             await m.answer(texts.AFTER_TEST_SUMMARY, reply_markup=kb.after_test_kb(cfg.manager_username))
 
-    # FSM fallback: отвечает ТОЛЬКО если пользователь сейчас в каком-то стейте
     @dp.message(StateFilter("*"))
     async def fsm_fallback(m: Message, state: FSMContext):
         if await state.get_state() is None:
