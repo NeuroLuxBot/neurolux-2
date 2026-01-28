@@ -45,7 +45,7 @@ async def main():
     bot = Bot(token=cfg.bot_token, parse_mode=ParseMode.MARKDOWN)
     dp = Dispatcher()
 
-    # Оставляем твою текущую модель: cfg.admin_chat_id == твой user_id (как ты сказал)
+    # По твоей логике: cfg.admin_chat_id == твой user_id
     ADMIN_ID = int(cfg.admin_chat_id)
 
     async def notify_admin(text: str):
@@ -57,7 +57,6 @@ async def main():
                 parse_mode=None,
                 disable_web_page_preview=True
             )
-            logging.info("Admin notified OK")
         except Exception as e:
             logging.exception(f"Admin notify error: {e}")
 
@@ -67,7 +66,7 @@ async def main():
         return True
 
     # ========================= ADMIN: GET FILE_ID (ТОЛЬКО ДЛЯ АДМИНА) =========================
-    # Если ТЫ (админ) отправил медиа боту в обычном режиме (когда нет FSM-стейта) — бот вернёт file_id.
+    # Если админ прислал медиа в обычном режиме (нет FSM-стейта) — показываем file_id.
 
     @dp.message(StateFilter(None), F.from_user.id == ADMIN_ID, F.video)
     async def admin_capture_video_id(m: Message):
@@ -99,7 +98,7 @@ async def main():
             f"{p.file_unique_id}"
         )
 
-    # Команда /getid: ответь на сообщение с медиа → получишь file_id (только админ)
+    # /getid: ответь на сообщение с медиа → получишь file_id (только админ)
     @dp.message(Command("getid"))
     async def admin_getid_reply(m: Message):
         if m.from_user.id != ADMIN_ID:
@@ -139,7 +138,7 @@ async def main():
         return await m.answer("В reply нет видео/фото/файла. Ответь на медиа и снова /getid.")
 
     # ========================= ADMIN COMMANDS (monitoring + manual send) =========================
-    # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: теперь /video (и /photo) не молчат — показывают ошибку Telegram.
+    # ВАЖНО: /video и /photo теперь не молчат — показывают точную ошибку Telegram.
 
     @dp.message(Command("say"))
     async def admin_say(m: Message):
@@ -214,6 +213,7 @@ async def main():
                 user_id = int(parts[1])
             except ValueError:
                 return await m.answer("Формат: /video user_id file_id")
+
             file_id = parts[2].strip()
 
             try:
@@ -241,7 +241,7 @@ async def main():
         except Exception as e:
             await m.answer(f"❌ Ошибка send_video:\n{type(e).__name__}: {e}")
 
-    # ДОБАВЛЕНО: /doc для случаев, когда видео приходит как DOCUMENT (AgAD...)
+    # /doc — если файл_id типа AgAD... (document)
     @dp.message(Command("doc"))
     async def admin_doc(m: Message):
         if m.from_user.id != ADMIN_ID:
@@ -284,7 +284,8 @@ async def main():
         await c.message.answer(texts.PREMIUM_PAGE, reply_markup=kb.premium_kb(cfg.manager_username))
         await c.answer()
 
-    @dp.callback_query(F.data == "premium:buy"))
+    # ✅ ИСПРАВЛЕНО: убрана лишняя скобка
+    @dp.callback_query(F.data == "premium:buy")
     async def premium_buy(c: CallbackQuery):
         db.set_subscription(c.from_user.id, plan="premium", status="pending")
 
@@ -584,6 +585,7 @@ async def main():
             await m.answer(report)
             await m.answer(texts.AFTER_TEST_SUMMARY, reply_markup=kb.after_test_kb(cfg.manager_username))
 
+    # FSM fallback: отвечает ТОЛЬКО если пользователь сейчас в каком-то стейте
     @dp.message(StateFilter("*"))
     async def fsm_fallback(m: Message, state: FSMContext):
         if await state.get_state() is None:
