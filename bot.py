@@ -46,7 +46,7 @@ async def main():
     dp = Dispatcher()
 
     async def notify_admin(text: str):
-        # ВАЖНО: админу шлём без Markdown, чтобы не было "can't parse entities"
+        # админу шлём без Markdown, чтобы не было "can't parse entities"
         try:
             await bot.send_message(
                 cfg.admin_chat_id,
@@ -99,7 +99,7 @@ async def main():
             "Action: свяжись лично и договорись об оплате/старте."
         )
 
-        await c.message.answer(texts.MANAGER_INSTRUCTION, reply_markup=kb.manager_only_kb(cfg.manager_username))
+        # УБРАЛИ texts.MANAGER_INSTRUCTION (дублирует и засоряет)
         await c.message.answer(texts.PREMIUM_REQUEST_SENT, reply_markup=kb.manager_only_kb(cfg.manager_username))
         await c.answer()
 
@@ -160,7 +160,7 @@ async def main():
             "Action: свяжись лично и уточни детали/цену."
         )
 
-        await m.answer(texts.MANAGER_INSTRUCTION, reply_markup=kb.manager_only_kb(cfg.manager_username))
+        # УБРАЛИ texts.MANAGER_INSTRUCTION (дублирует и засоряет)
         await m.answer(texts.LUX_REQUEST_SENT, reply_markup=kb.manager_only_kb(cfg.manager_username))
         await m.answer("🔙 Возврат в меню:", reply_markup=kb.main_menu(cfg.manager_username))
 
@@ -213,7 +213,7 @@ async def main():
         )
         await c.answer()
 
-    # ✅ Текстовый ввод цели (must-have)
+    # Текстовый ввод цели (must-have)
     @dp.message(FreeTestFlow.goal)
     async def free_goal_text(m: Message, state: FSMContext):
         txt = safe_text(m)
@@ -228,7 +228,7 @@ async def main():
             "2) *ссылку текстом* одним сообщением."
         )
 
-    # ✅ Материал: только VIDEO или TEXT
+    # Материал: только VIDEO или TEXT
     @dp.message(FreeTestFlow.material)
     async def free_material(m: Message, state: FSMContext):
         if m.video:
@@ -251,7 +251,7 @@ async def main():
 
         db.set_test_day(m.from_user.id, 1)
 
-        # ✅ мониторинг: исходник получен
+        # мониторинг: исходник получен
         last = db.get_last_test_fields(m.from_user.id)
         await notify_admin(
             "📥 Free тест: исходник получен\n"
@@ -291,7 +291,7 @@ async def main():
         # сохраняем для следующего шага статистики
         await state.update_data(post_link=link)
 
-        # ✅ мониторинг: ссылка на пост
+        # мониторинг: ссылка на пост
         day = db.get_test_day(m.from_user.id)
         await notify_admin(
             "🔗 Free тест: ссылка на пост\n"
@@ -300,7 +300,7 @@ async def main():
             f"Post: {link}"
         )
 
-        # ВАЖНО: не чистим данные, только сбрасываем state
+        # сбрасываем только state (данные остаются)
         await state.set_state(None)
 
         await m.answer("Ссылка сохранена. Теперь введём статистику.", reply_markup=kb.after_posted_kb())
@@ -355,7 +355,7 @@ async def main():
 
         db.add_stats(m.from_user.id, day, post_link, views, likes, comments, follows)
 
-        # ✅ мониторинг: статистика
+        # мониторинг: статистика
         await notify_admin(
             "📊 Free тест: статистика\n"
             f"User: {safe_username(m.from_user.username)} | id={m.from_user.id}\n"
@@ -394,7 +394,7 @@ async def main():
             await m.answer(report)
             await m.answer(texts.AFTER_TEST_SUMMARY, reply_markup=kb.after_test_kb(cfg.manager_username))
 
-    # ✅ FSM fallback: отвечает ТОЛЬКО если пользователь сейчас в каком-то стейте
+    # FSM fallback: отвечает ТОЛЬКО если пользователь сейчас в каком-то стейте
     @dp.message(StateFilter("*"))
     async def fsm_fallback(m: Message, state: FSMContext):
         if await state.get_state() is None:
