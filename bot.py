@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import re
+from typing import Optional, Tuple
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery
@@ -14,6 +16,8 @@ import db
 from states import FreeTestFlow, LuxFlow
 from services import make_test_report
 
+
+# -------------------- helpers --------------------
 
 def is_int(s: str) -> bool:
     try:
@@ -36,6 +40,47 @@ def safe_text(m: Message) -> str | None:
     return t if t else None
 
 
+def norm_text(s: str) -> str:
+    # убираем нулевой ширины символы и мусор, который иногда ломает split
+    return re.sub(r"[\u200b-\u200f\u2060\uFEFF]", "", s or "").strip()
+
+
+def parse_user_and_file(text: str) -> Tuple[Optional[int], Optional[str]]:
+    """
+    Достаёт user_id и file_id максимально устойчиво.
+    Поддержка:
+      /cmd 123 file_id
+      /cmd 123
+      /cmd@BotName 123 file_id
+    """
+    t = norm_text(text)
+    if not t:
+        return None, None
+
+    # убираем /cmd и /cmd@bot
+    t = re.sub(r"^/\w+(?:@\w+)?\s*", "", t).strip()
+    if not t:
+        return None, None
+
+    # user_id — первое число
+    m = re.match(r"^(\d+)\s*(.*)$", t)
+    if not m:
+        return None, None
+
+    user_id = int(m.group(1))
+    rest = m.group(2).strip()
+
+    # file_id — всё, что осталось (может быть длинным, без пробелов)
+    file_id = rest if rest else None
+    return user_id, file_id
+
+
+async def send_err(m: Message, where: str, e: Exception):
+    await m.answer(f"❌ {where}:\n{type(e).__name__}: {e}")
+
+
+# -------------------- main --------------------
+
 async def main():
     logging.basicConfig(level=logging.INFO)
 
@@ -45,11 +90,17 @@ async def main():
     bot = Bot(token=cfg.bot_token, parse_mode=ParseMode.MARKDOWN)
     dp = Dispatcher()
 
-    # По твоей логике: cfg.admin_chat_id == твой user_id
+    # cfg.admin_chat_id == твой user_id
     ADMIN_ID = int(cfg.admin_chat_id)
 
+    # Храним последние file_id, чтобы НЕ нужно было их копировать руками
+    last_media = {
+        "video": None,     # file_id видео
+        "document": None,  # file_id файла
+        "photo": None,     # file_id фото
+    }
+
     async def notify_admin(text: str):
-        # админу шлём без Markdown, чтобы не было "can't parse entities"
         try:
             await bot.send_message(
                 ADMIN_ID,
@@ -65,44 +116,53 @@ async def main():
         logging.exception(f"Unhandled error: {exception}")
         return True
 
-    # ========================= ADMIN: GET FILE_ID (ТОЛЬКО ДЛЯ АДМИНА) =========================
-    # Если админ прислал медиа в обычном режиме (нет FSM-стейта) — показываем file_id.
+    # ========================= ADMIN: CAPTURE FILE_ID (ТОЛЬКО ДЛЯ АДМИНА) =========================
+    # Ты отправляешь боту медиа (когда нет FSM-шага) → бот возвращает file_id и сохраняет в last_media.
 
     @dp.message(StateFilter(None), F.from_user.id == ADMIN_ID, F.video)
     async def admin_capture_video_id(m: Message):
         v = m.video
+        last_media["video"] = v.file_id
         await m.answer(
             "🎥 VIDEO FILE_ID:\n"
             f"{v.file_id}\n\n"
             "🧷 FILE_UNIQUE_ID:\n"
-            f"{v.file_unique_id}"
+            f"{v.file_unique_id}\n\n"
+            "✅ Сохранено как LAST VIDEO. Теперь можно:\n"
+            f"`/video <user_id>` (без file_id)"
         )
 
     @dp.message(StateFilter(None), F.from_user.id == ADMIN_ID, F.document)
     async def admin_capture_document_id(m: Message):
         d = m.document
+        last_media["document"] = d.file_id
         await m.answer(
             "📄 DOCUMENT FILE_ID:\n"
             f"{d.file_id}\n\n"
             "🧷 FILE_UNIQUE_ID:\n"
-            f"{d.file_unique_id}"
+            f"{d.file_unique_id}\n\n"
+            "✅ Сохранено как LAST DOC. Теперь можно:\n"
+            f"`/doc <user_id>` (без file_id)"
         )
 
     @dp.message(StateFilter(None), F.from_user.id == ADMIN_ID, F.photo)
     async def admin_capture_photo_id(m: Message):
         p = m.photo[-1]
+        last_media["photo"] = p.file_id
         await m.answer(
             "🖼 PHOTO FILE_ID:\n"
             f"{p.file_id}\n\n"
             "🧷 FILE_UNIQUE_ID:\n"
-            f"{p.file_unique_id}"
+            f"{p.file_unique_id}\n\n"
+            "✅ Сохранено как LAST PHOTO. Теперь можно:\n"
+            f"`/photo <user_id>` (без file_id)"
         )
 
     # /getid: ответь на сообщение с медиа → получишь file_id (только админ)
     @dp.message(Command("getid"))
     async def admin_getid_reply(m: Message):
         if m.from_user.id != ADMIN_ID:
-            return
+            return await m.answer("⛔ Нет доступа.")
 
         r = m.reply_to_message
         if not r:
@@ -110,40 +170,49 @@ async def main():
 
         if r.video:
             x = r.video
+            last_media["video"] = x.file_id
             return await m.answer(
                 "🎥 VIDEO FILE_ID:\n"
                 f"{x.file_id}\n\n"
                 "🧷 FILE_UNIQUE_ID:\n"
-                f"{x.file_unique_id}"
+                f"{x.file_unique_id}\n\n"
+                "✅ Сохранено как LAST VIDEO."
             )
 
         if r.document:
             x = r.document
+            last_media["document"] = x.file_id
             return await m.answer(
                 "📄 DOCUMENT FILE_ID:\n"
                 f"{x.file_id}\n\n"
                 "🧷 FILE_UNIQUE_ID:\n"
-                f"{x.file_unique_id}"
+                f"{x.file_unique_id}\n\n"
+                "✅ Сохранено как LAST DOC."
             )
 
         if r.photo:
             x = r.photo[-1]
+            last_media["photo"] = x.file_id
             return await m.answer(
                 "🖼 PHOTO FILE_ID:\n"
                 f"{x.file_id}\n\n"
                 "🧷 FILE_UNIQUE_ID:\n"
-                f"{x.file_unique_id}"
+                f"{x.file_unique_id}\n\n"
+                "✅ Сохранено как LAST PHOTO."
             )
 
         return await m.answer("В reply нет видео/фото/файла. Ответь на медиа и снова /getid.")
 
-    # ========================= ADMIN COMMANDS (monitoring + manual send) =========================
-    # ВАЖНО: /video и /photo теперь не молчат — показывают точную ошибку Telegram.
+    # ========================= ADMIN SEND =========================
+    # Ключевое: теперь /video и /doc работают 3 способами:
+    # 1) /video user_id file_id
+    # 2) reply на медиа: /video user_id
+    # 3) без reply и без file_id: /video user_id (использует LAST VIDEO, который ты до этого прислал боту)
 
     @dp.message(Command("say"))
     async def admin_say(m: Message):
         if m.from_user.id != ADMIN_ID:
-            return
+            return await m.answer("⛔ Нет доступа.")
 
         parts = (m.text or "").split(maxsplit=2)
         if len(parts) < 3:
@@ -159,109 +228,118 @@ async def main():
             await bot.send_message(user_id, text)
             await m.answer("✅ Сообщение отправлено.")
         except Exception as e:
-            await m.answer(f"❌ Ошибка send_message:\n{type(e).__name__}: {e}")
+            await send_err(m, "send_message", e)
 
     @dp.message(Command("photo"))
     async def admin_photo(m: Message):
         if m.from_user.id != ADMIN_ID:
-            return
+            return await m.answer("⛔ Нет доступа.")
 
-        parts = (m.text or "").split(maxsplit=2)
+        user_id, file_id = parse_user_and_file(m.text or "")
 
-        # 1) /photo user_id file_id
-        if len(parts) >= 3:
-            try:
-                user_id = int(parts[1])
-            except ValueError:
-                return await m.answer("Формат: /photo user_id file_id")
-            file_id = parts[2].strip()
+        if user_id is None:
+            return await m.answer("Формат:\n`/photo user_id file_id`\nили reply: `/photo user_id`\nили: `/photo user_id` (LAST PHOTO)")
+
+        # 1) file_id из команды
+        if file_id:
             try:
                 await bot.send_photo(chat_id=user_id, photo=file_id)
                 return await m.answer("🖼 Фото отправлено.")
             except Exception as e:
-                return await m.answer(f"❌ Ошибка send_photo:\n{type(e).__name__}: {e}")
+                return await send_err(m, "send_photo", e)
 
-        # 2) reply на фото: /photo user_id
-        if not m.reply_to_message or not m.reply_to_message.photo:
-            return await m.answer("Формат: /photo user_id file_id ИЛИ ответь командой /photo user_id на фото.")
+        # 2) reply на фото
+        if m.reply_to_message and m.reply_to_message.photo:
+            fid = m.reply_to_message.photo[-1].file_id
+            try:
+                await bot.send_photo(chat_id=user_id, photo=fid)
+                return await m.answer("🖼 Фото отправлено (reply).")
+            except Exception as e:
+                return await send_err(m, "send_photo(reply)", e)
 
-        if len(parts) < 2:
-            return await m.answer("Формат: /photo user_id (ответом на фото).")
-
+        # 3) LAST PHOTO
+        fid = last_media.get("photo")
+        if not fid:
+            return await m.answer("Нет LAST PHOTO. Сначала пришли боту фото (когда нет FSM-шага) или сделай reply /getid.")
         try:
-            user_id = int(parts[1])
-        except ValueError:
-            return await m.answer("user_id должен быть числом.")
-
-        file_id = m.reply_to_message.photo[-1].file_id
-        try:
-            await bot.send_photo(chat_id=user_id, photo=file_id)
-            await m.answer("🖼 Фото отправлено (из reply).")
+            await bot.send_photo(chat_id=user_id, photo=fid)
+            return await m.answer("🖼 Фото отправлено (LAST PHOTO).")
         except Exception as e:
-            await m.answer(f"❌ Ошибка send_photo:\n{type(e).__name__}: {e}")
+            return await send_err(m, "send_photo(LAST)", e)
 
     @dp.message(Command("video"))
     async def admin_video(m: Message):
         if m.from_user.id != ADMIN_ID:
-            return
+            return await m.answer("⛔ Нет доступа.")
 
-        parts = (m.text or "").split(maxsplit=2)
+        user_id, file_id = parse_user_and_file(m.text or "")
 
-        # 1) /video user_id file_id
-        if len(parts) >= 3:
-            try:
-                user_id = int(parts[1])
-            except ValueError:
-                return await m.answer("Формат: /video user_id file_id")
+        if user_id is None:
+            return await m.answer("Формат:\n`/video user_id file_id`\nили reply: `/video user_id`\nили: `/video user_id` (LAST VIDEO)")
 
-            file_id = parts[2].strip()
-
+        # 1) file_id из команды
+        if file_id:
             try:
                 await bot.send_video(chat_id=user_id, video=file_id)
                 return await m.answer("🎬 Видео отправлено.")
             except Exception as e:
-                return await m.answer(f"❌ Ошибка send_video:\n{type(e).__name__}: {e}")
+                return await send_err(m, "send_video", e)
 
-        # 2) reply на видео: /video user_id
-        if not m.reply_to_message or not m.reply_to_message.video:
-            return await m.answer("Формат: /video user_id file_id ИЛИ ответь командой /video user_id на видео.")
+        # 2) reply на видео
+        if m.reply_to_message and m.reply_to_message.video:
+            fid = m.reply_to_message.video.file_id
+            try:
+                await bot.send_video(chat_id=user_id, video=fid)
+                return await m.answer("🎬 Видео отправлено (reply).")
+            except Exception as e:
+                return await send_err(m, "send_video(reply)", e)
 
-        if len(parts) < 2:
-            return await m.answer("Формат: /video user_id (ответом на видео).")
-
+        # 3) LAST VIDEO
+        fid = last_media.get("video")
+        if not fid:
+            return await m.answer("Нет LAST VIDEO. Сначала пришли боту видео (когда нет FSM-шага) или сделай reply /getid.")
         try:
-            user_id = int(parts[1])
-        except ValueError:
-            return await m.answer("user_id должен быть числом.")
-
-        file_id = m.reply_to_message.video.file_id
-        try:
-            await bot.send_video(chat_id=user_id, video=file_id)
-            await m.answer("🎬 Видео отправлено (из reply).")
+            await bot.send_video(chat_id=user_id, video=fid)
+            return await m.answer("🎬 Видео отправлено (LAST VIDEO).")
         except Exception as e:
-            await m.answer(f"❌ Ошибка send_video:\n{type(e).__name__}: {e}")
+            return await send_err(m, "send_video(LAST)", e)
 
-    # /doc — если файл_id типа AgAD... (document)
     @dp.message(Command("doc"))
     async def admin_doc(m: Message):
         if m.from_user.id != ADMIN_ID:
-            return
+            return await m.answer("⛔ Нет доступа.")
 
-        parts = (m.text or "").split(maxsplit=2)
-        if len(parts) < 3:
-            return await m.answer("Формат: /doc user_id file_id")
+        user_id, file_id = parse_user_and_file(m.text or "")
 
+        if user_id is None:
+            return await m.answer("Формат:\n`/doc user_id file_id`\nили reply: `/doc user_id`\nили: `/doc user_id` (LAST DOC)")
+
+        # 1) file_id из команды
+        if file_id:
+            try:
+                await bot.send_document(chat_id=user_id, document=file_id)
+                return await m.answer("📄 Файл отправлен.")
+            except Exception as e:
+                return await send_err(m, "send_document", e)
+
+        # 2) reply на документ
+        if m.reply_to_message and m.reply_to_message.document:
+            fid = m.reply_to_message.document.file_id
+            try:
+                await bot.send_document(chat_id=user_id, document=fid)
+                return await m.answer("📄 Файл отправлен (reply).")
+            except Exception as e:
+                return await send_err(m, "send_document(reply)", e)
+
+        # 3) LAST DOC
+        fid = last_media.get("document")
+        if not fid:
+            return await m.answer("Нет LAST DOC. Сначала пришли боту файл (когда нет FSM-шага) или сделай reply /getid.")
         try:
-            user_id = int(parts[1])
-        except ValueError:
-            return await m.answer("user_id должен быть числом.")
-
-        file_id = parts[2].strip()
-        try:
-            await bot.send_document(chat_id=user_id, document=file_id)
-            await m.answer("📄 Файл отправлен.")
+            await bot.send_document(chat_id=user_id, document=fid)
+            return await m.answer("📄 Файл отправлен (LAST DOC).")
         except Exception as e:
-            await m.answer(f"❌ Ошибка send_document:\n{type(e).__name__}: {e}")
+            return await send_err(m, "send_document(LAST)", e)
 
     # ========================= /start =========================
 
@@ -284,7 +362,6 @@ async def main():
         await c.message.answer(texts.PREMIUM_PAGE, reply_markup=kb.premium_kb(cfg.manager_username))
         await c.answer()
 
-    # ✅ ИСПРАВЛЕНО: убрана лишняя скобка
     @dp.callback_query(F.data == "premium:buy")
     async def premium_buy(c: CallbackQuery):
         db.set_subscription(c.from_user.id, plan="premium", status="pending")
@@ -585,7 +662,7 @@ async def main():
             await m.answer(report)
             await m.answer(texts.AFTER_TEST_SUMMARY, reply_markup=kb.after_test_kb(cfg.manager_username))
 
-    # FSM fallback: отвечает ТОЛЬКО если пользователь сейчас в каком-то стейте
+    # FSM fallback
     @dp.message(StateFilter("*"))
     async def fsm_fallback(m: Message, state: FSMContext):
         if await state.get_state() is None:
