@@ -199,7 +199,7 @@ async def main():
             reply_markup=kb.goal_kb()
         )
 
-    # Кнопка цели (как было)
+    # Кнопка цели
     @dp.callback_query(F.data.startswith("free:goal:"))
     async def free_goal_btn(c: CallbackQuery, state: FSMContext):
         goal = c.data.split("free:goal:", 1)[1]
@@ -234,10 +234,12 @@ async def main():
         if m.video:
             db.update_test_field(m.from_user.id, "material_type", "video")
             db.update_test_field(m.from_user.id, "material_value", m.video.file_id)
+            material_label = "video(file_id)"
         elif m.text and m.text.strip():
             link = m.text.strip()
             db.update_test_field(m.from_user.id, "material_type", "link")
             db.update_test_field(m.from_user.id, "material_value", link)
+            material_label = "link"
         else:
             return await m.answer(
                 "❌ Сейчас пришло не видео и не ссылка.\n\n"
@@ -248,6 +250,18 @@ async def main():
             )
 
         db.set_test_day(m.from_user.id, 1)
+
+        # ✅ мониторинг: исходник получен
+        last = db.get_last_test_fields(m.from_user.id)
+        await notify_admin(
+            "📥 Free тест: исходник получен\n"
+            f"User: {safe_username(m.from_user.username)} | id={m.from_user.id}\n"
+            f"Niche: {last.get('niche','—')}\n"
+            f"TikTok: {last.get('tiktok_link','—')}\n"
+            f"Goal: {last.get('goal','—')}\n"
+            f"Material: {material_label}"
+        )
+
         await state.clear()
         await m.answer(
             "✅ Принято. *День 1* стартовал.\n"
@@ -255,8 +269,6 @@ async def main():
             "Выложи в течение 24 часов.",
             reply_markup=kb.day_actions_kb()
         )
-
-    # ⬇⬇⬇ ВОТ ЭТОГО У ТЕБЯ СЕЙЧАС НЕ ХВАТАЕТ, ИЗ-ЗА ЭТОГО КНОПКИ НЕ РАБОТАЛИ ⬇⬇⬇
 
     @dp.callback_query(F.data == "free:rules")
     async def free_rules(c: CallbackQuery):
@@ -275,8 +287,22 @@ async def main():
         link = safe_text(m)
         if not link:
             return await m.answer("Пришли ссылку *текстом* (не файлом/стикером).")
+
+        # сохраняем для следующего шага статистики
         await state.update_data(post_link=link)
-        await state.clear()
+
+        # ✅ мониторинг: ссылка на пост
+        day = db.get_test_day(m.from_user.id)
+        await notify_admin(
+            "🔗 Free тест: ссылка на пост\n"
+            f"User: {safe_username(m.from_user.username)} | id={m.from_user.id}\n"
+            f"Day: {day}\n"
+            f"Post: {link}"
+        )
+
+        # ВАЖНО: не чистим данные, только сбрасываем state
+        await state.set_state(None)
+
         await m.answer("Ссылка сохранена. Теперь введём статистику.", reply_markup=kb.after_posted_kb())
 
     @dp.callback_query(F.data == "free:stats")
@@ -329,6 +355,15 @@ async def main():
 
         db.add_stats(m.from_user.id, day, post_link, views, likes, comments, follows)
 
+        # ✅ мониторинг: статистика
+        await notify_admin(
+            "📊 Free тест: статистика\n"
+            f"User: {safe_username(m.from_user.username)} | id={m.from_user.id}\n"
+            f"Day: {day}\n"
+            f"Views: {views}, Likes: {likes}, Comments: {comments}, Follows: {follows}\n"
+            f"Post: {post_link}"
+        )
+
         if day < 3:
             db.set_test_day(m.from_user.id, day + 1)
             await state.clear()
@@ -359,9 +394,11 @@ async def main():
             await m.answer(report)
             await m.answer(texts.AFTER_TEST_SUMMARY, reply_markup=kb.after_test_kb(cfg.manager_username))
 
-    # ✅ Нормальный FSM fallback
+    # ✅ FSM fallback: отвечает ТОЛЬКО если пользователь сейчас в каком-то стейте
     @dp.message(StateFilter("*"))
-    async def fsm_fallback(m: Message):
+    async def fsm_fallback(m: Message, state: FSMContext):
+        if await state.get_state() is None:
+            return
         await m.answer(
             "Я жду ответ *текстом* или *видео файлом* по текущему шагу.\n"
             "Если нужно — нажми /start."
