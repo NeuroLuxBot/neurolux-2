@@ -1,4 +1,6 @@
 import asyncio
+import logging
+
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.enums import ParseMode
@@ -12,19 +14,32 @@ import db
 from states import FreeTestFlow, LuxFlow
 from services import make_test_report
 
+
 def is_int(s: str) -> bool:
     try:
         int(s)
         return True
-    except:
+    except Exception:
         return False
+
 
 def safe_username(u: str | None) -> str:
     if not u:
         return "—"
     return f"@{u}"
 
+
+def safe_text(m: Message) -> str | None:
+    """Return stripped text if exists, else None."""
+    if not m.text:
+        return None
+    t = m.text.strip()
+    return t if t else None
+
+
 async def main():
+    logging.basicConfig(level=logging.INFO)
+
     cfg = load_config()
     db.init_db()
 
@@ -32,11 +47,19 @@ async def main():
     dp = Dispatcher()
 
     async def notify_admin(text: str):
+        """Send message to admin chat and log failures (so we can debug delivery)."""
         try:
             await bot.send_message(cfg.admin_chat_id, text)
-        except:
-            # уведомление не критично для работы бота
-            pass
+            logging.info("Admin notified OK")
+        except Exception as e:
+            logging.exception(f"Failed to notify admin: {e}")
+
+    # Global errors (so we can see any unexpected crash in logs)
+    @dp.error()
+    async def on_error(event, exception: Exception):
+        logging.exception(f"Unhandled error: {exception}")
+        # We don't always have a message/callback context; return True to stop re-raising
+        return True
 
     # /start
     @dp.message(CommandStart())
@@ -93,25 +116,33 @@ async def main():
 
     @dp.message(LuxFlow.goal)
     async def lux_goal(m: Message, state: FSMContext):
-        await state.update_data(goal=m.text.strip())
+        txt = safe_text(m)
+        if not txt:
+            return await m.answer("Напиши цель *текстом* (заявки / продажи / бренд).")
+        await state.update_data(goal=txt)
         await state.set_state(LuxFlow.volume)
         await m.answer("Сколько роликов в месяц нужно? (10/20/30)")
 
     @dp.message(LuxFlow.volume)
     async def lux_volume(m: Message, state: FSMContext):
-        txt = m.text.strip()
+        txt = safe_text(m)
+        if not txt:
+            return await m.answer("Введи 10, 20 или 30 *текстом*.")
         if txt not in {"10", "20", "30"}:
             return await m.answer("Введи 10, 20 или 30.")
         await state.update_data(volume=int(txt))
         await state.set_state(LuxFlow.account_link)
-        await m.answer("Ссылка на TikTok аккаунт:")
+        await m.answer("Ссылка на TikTok аккаунт (текстом):")
 
     @dp.message(LuxFlow.account_link)
     async def lux_account(m: Message, state: FSMContext):
+        link = safe_text(m)
+        if not link:
+            return await m.answer("Пришли ссылку на TikTok аккаунт *текстом* (не файлом/стикером).")
+
         data = await state.get_data()
         goal = data.get("goal")
         volume = data.get("volume")
-        link = m.text.strip()
 
         await state.clear()
         db.set_subscription(m.from_user.id, plan="lux", status="pending")
@@ -151,12 +182,15 @@ async def main():
         niche = c.data.split("free:niche:", 1)[1]
         db.update_test_field(c.from_user.id, "niche", niche)
         await state.set_state(FreeTestFlow.tiktok_link)
-        await c.message.answer("Ссылка на TikTok аккаунт:")
+        await c.message.answer("Ссылка на TikTok аккаунт (текстом):")
         await c.answer()
 
     @dp.message(FreeTestFlow.tiktok_link)
     async def free_tiktok_link(m: Message, state: FSMContext):
-        db.update_test_field(m.from_user.id, "tiktok_link", m.text.strip())
+        link = safe_text(m)
+        if not link:
+            return await m.answer("Пришли ссылку на TikTok *текстом* (не файлом/стикером/голосом).")
+        db.update_test_field(m.from_user.id, "tiktok_link", link)
         await state.set_state(FreeTestFlow.goal)
         await m.answer("Цель теста:", reply_markup=kb.goal_kb())
 
@@ -165,7 +199,12 @@ async def main():
         goal = c.data.split("free:goal:", 1)[1]
         db.update_test_field(c.from_user.id, "goal", goal)
         await state.set_state(FreeTestFlow.material)
-        await c.message.answer("Отправь исходник (видео файлом) ИЛИ ссылку на исходник одним сообщением.")
+        await c.message.answer(
+            "Отправь исходник:\n"
+            "1) *видео файлом* (лучше)\n"
+            "или\n"
+            "2) *ссылку текстом* одним сообщением."
+        )
         await c.answer()
 
     @dp.message(FreeTestFlow.material)
@@ -174,8 +213,14 @@ async def main():
             db.update_test_field(m.from_user.id, "material_type", "video")
             db.update_test_field(m.from_user.id, "material_value", m.video.file_id)
         else:
+            link = safe_text(m)
+            if not link:
+                return await m.answer(
+                    "Нужно отправить либо *видео файлом*, либо *ссылку текстом*.\n"
+                    "Сейчас пришло не текст и не видео."
+                )
             db.update_test_field(m.from_user.id, "material_type", "link")
-            db.update_test_field(m.from_user.id, "material_value", m.text.strip())
+            db.update_test_field(m.from_user.id, "material_value", link)
 
         db.set_test_day(m.from_user.id, 1)
         await state.clear()
@@ -195,12 +240,15 @@ async def main():
     async def free_posted(c: CallbackQuery, state: FSMContext):
         day = db.get_test_day(c.from_user.id)
         await state.set_state(FreeTestFlow.day_publish_link)
-        await c.message.answer(f"Ок. Пришли ссылку на опубликованное видео (День {day}).")
+        await c.message.answer(f"Ок. Пришли ссылку на опубликованное видео (День {day}) текстом.")
         await c.answer()
 
     @dp.message(FreeTestFlow.day_publish_link)
     async def free_post_link(m: Message, state: FSMContext):
-        await state.update_data(post_link=m.text.strip())
+        link = safe_text(m)
+        if not link:
+            return await m.answer("Пришли ссылку *текстом* (не файлом/стикером).")
+        await state.update_data(post_link=link)
         await state.clear()
         await m.answer("Ссылка сохранена. Теперь введём статистику.", reply_markup=kb.after_posted_kb())
 
@@ -212,31 +260,35 @@ async def main():
 
     @dp.message(FreeTestFlow.stats_views)
     async def free_stats_views(m: Message, state: FSMContext):
-        if not is_int(m.text.strip()):
+        txt = safe_text(m)
+        if not txt or not is_int(txt):
             return await m.answer("Введи число просмотров.")
-        await state.update_data(views=int(m.text.strip()))
+        await state.update_data(views=int(txt))
         await state.set_state(FreeTestFlow.stats_likes)
         await m.answer("Лайки (числом):")
 
     @dp.message(FreeTestFlow.stats_likes)
     async def free_stats_likes(m: Message, state: FSMContext):
-        if not is_int(m.text.strip()):
+        txt = safe_text(m)
+        if not txt or not is_int(txt):
             return await m.answer("Введи число лайков.")
-        await state.update_data(likes=int(m.text.strip()))
+        await state.update_data(likes=int(txt))
         await state.set_state(FreeTestFlow.stats_comments)
         await m.answer("Комментарии (числом):")
 
     @dp.message(FreeTestFlow.stats_comments)
     async def free_stats_comments(m: Message, state: FSMContext):
-        if not is_int(m.text.strip()):
+        txt = safe_text(m)
+        if not txt or not is_int(txt):
             return await m.answer("Введи число комментариев.")
-        await state.update_data(comments=int(m.text.strip()))
+        await state.update_data(comments=int(txt))
         await state.set_state(FreeTestFlow.stats_follows)
         await m.answer("Подписки/переходы (если нет — 0):")
 
     @dp.message(FreeTestFlow.stats_follows)
     async def free_stats_follows(m: Message, state: FSMContext):
-        if not is_int(m.text.strip()):
+        txt = safe_text(m)
+        if not txt or not is_int(txt):
             return await m.answer("Введи число (можно 0).")
 
         data = await state.get_data()
@@ -246,7 +298,7 @@ async def main():
         views = data.get("views", 0)
         likes = data.get("likes", 0)
         comments = data.get("comments", 0)
-        follows = int(m.text.strip())
+        follows = int(txt)
 
         db.add_stats(m.from_user.id, day, post_link, views, likes, comments, follows)
 
@@ -281,6 +333,7 @@ async def main():
             await m.answer(texts.AFTER_TEST_SUMMARY, reply_markup=kb.after_test_kb(cfg.manager_username))
 
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
