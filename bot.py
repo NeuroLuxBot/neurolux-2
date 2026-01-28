@@ -47,9 +47,20 @@ async def main():
     dp = Dispatcher()
 
     async def notify_admin(text: str):
-        """Send message to admin chat and log failures (so we can debug delivery)."""
+        """
+        Send message to admin chat and log failures (so we can debug delivery).
+
+        IMPORTANT:
+        Admin notifications are sent WITHOUT Markdown parsing to avoid errors like:
+        'Bad Request: can't parse entities ...'
+        """
         try:
-            await bot.send_message(cfg.admin_chat_id, text)
+            await bot.send_message(
+                cfg.admin_chat_id,
+                text,
+                parse_mode=None,                  # <-- ключевой фикс
+                disable_web_page_preview=True     # чтобы ссылки не раздували сообщение
+            )
             logging.info("Admin notified OK")
         except Exception as e:
             logging.exception(f"Failed to notify admin: {e}")
@@ -58,7 +69,6 @@ async def main():
     @dp.error()
     async def on_error(event, exception: Exception):
         logging.exception(f"Unhandled error: {exception}")
-        # We don't always have a message/callback context; return True to stop re-raising
         return True
 
     # /start
