@@ -4,7 +4,7 @@ import logging
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.enums import ParseMode
-from aiogram.filters import CommandStart, StateFilter
+from aiogram.filters import CommandStart, StateFilter, Command
 from aiogram.fsm.context import FSMContext
 
 from config import load_config
@@ -63,14 +63,98 @@ async def main():
         logging.exception(f"Unhandled error: {exception}")
         return True
 
-    # /start
+    # ========================= ADMIN COMMANDS (monitoring + manual send) =========================
+
+    @dp.message(Command("say"))
+    async def admin_say(m: Message):
+        if m.from_user.id != cfg.admin_chat_id:
+            return
+
+        parts = (m.text or "").split(maxsplit=2)
+        if len(parts) < 3:
+            return await m.answer("Формат: /say user_id текст")
+
+        try:
+            user_id = int(parts[1])
+        except ValueError:
+            return await m.answer("user_id должен быть числом. Пример: /say 123456789 привет")
+
+        text = parts[2]
+        await bot.send_message(user_id, text)
+        await m.answer("✅ Сообщение отправлено.")
+
+    @dp.message(Command("photo"))
+    async def admin_photo(m: Message):
+        if m.from_user.id != cfg.admin_chat_id:
+            return
+
+        # 1) /photo user_id file_id
+        parts = (m.text or "").split(maxsplit=2)
+        if len(parts) >= 3:
+            try:
+                user_id = int(parts[1])
+            except ValueError:
+                return await m.answer("Формат: /photo user_id file_id")
+            file_id = parts[2]
+            await bot.send_photo(chat_id=user_id, photo=file_id)
+            return await m.answer("🖼 Фото отправлено.")
+
+        # 2) reply на фото: /photo user_id (в ответе лежит photo.file_id)
+        if not m.reply_to_message or not m.reply_to_message.photo:
+            return await m.answer("Формат: /photo user_id file_id ИЛИ ответь командой /photo user_id на фото.")
+
+        if len(parts) < 2:
+            return await m.answer("Формат: /photo user_id (ответом на фото).")
+
+        try:
+            user_id = int(parts[1])
+        except ValueError:
+            return await m.answer("user_id должен быть числом.")
+
+        file_id = m.reply_to_message.photo[-1].file_id
+        await bot.send_photo(chat_id=user_id, photo=file_id)
+        await m.answer("🖼 Фото отправлено (из reply).")
+
+    @dp.message(Command("video"))
+    async def admin_video(m: Message):
+        if m.from_user.id != cfg.admin_chat_id:
+            return
+
+        # 1) /video user_id file_id
+        parts = (m.text or "").split(maxsplit=2)
+        if len(parts) >= 3:
+            try:
+                user_id = int(parts[1])
+            except ValueError:
+                return await m.answer("Формат: /video user_id file_id")
+            file_id = parts[2]
+            await bot.send_video(chat_id=user_id, video=file_id)
+            return await m.answer("🎬 Видео отправлено.")
+
+        # 2) reply на видео: /video user_id
+        if not m.reply_to_message or not m.reply_to_message.video:
+            return await m.answer("Формат: /video user_id file_id ИЛИ ответь командой /video user_id на видео.")
+
+        if len(parts) < 2:
+            return await m.answer("Формат: /video user_id (ответом на видео).")
+
+        try:
+            user_id = int(parts[1])
+        except ValueError:
+            return await m.answer("user_id должен быть числом.")
+
+        file_id = m.reply_to_message.video.file_id
+        await bot.send_video(chat_id=user_id, video=file_id)
+        await m.answer("🎬 Видео отправлено (из reply).")
+
+    # ========================= /start =========================
+
     @dp.message(CommandStart())
     async def start(m: Message, state: FSMContext):
         await state.clear()
         db.upsert_user(m.from_user.id, m.from_user.username)
         await m.answer(texts.START, reply_markup=kb.main_menu(cfg.manager_username))
 
-    # back menu
     @dp.callback_query(F.data == "back:menu")
     async def back_menu(c: CallbackQuery, state: FSMContext):
         await state.clear()
@@ -99,7 +183,7 @@ async def main():
             "Action: свяжись лично и договорись об оплате/старте."
         )
 
-        # УБРАЛИ texts.MANAGER_INSTRUCTION (дублирует и засоряет)
+        # Убрали texts.MANAGER_INSTRUCTION
         await c.message.answer(texts.PREMIUM_REQUEST_SENT, reply_markup=kb.manager_only_kb(cfg.manager_username))
         await c.answer()
 
@@ -160,7 +244,7 @@ async def main():
             "Action: свяжись лично и уточни детали/цену."
         )
 
-        # УБРАЛИ texts.MANAGER_INSTRUCTION (дублирует и засоряет)
+        # Убрали texts.MANAGER_INSTRUCTION
         await m.answer(texts.LUX_REQUEST_SENT, reply_markup=kb.manager_only_kb(cfg.manager_username))
         await m.answer("🔙 Возврат в меню:", reply_markup=kb.main_menu(cfg.manager_username))
 
