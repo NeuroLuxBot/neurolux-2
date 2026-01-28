@@ -143,7 +143,14 @@ async def main():
 
     # ========================= ADMIN COMMANDS (monitoring + manual send) =========================
 
-    @dp.message(Command("say"))
+    @dp.message(Command("whoami"))
+async def whoami(m: Message):
+    await m.answer(
+        f"user_id: {m.from_user.id}\n"
+        f"chat_id: {m.chat.id}\n"
+        f"cfg.admin_chat_id: {cfg.admin_chat_id}"
+    
+    )@dp.message(Command("say"))
     async def admin_say(m: Message):
         if m.from_user.id != ADMIN_ID:
             return
