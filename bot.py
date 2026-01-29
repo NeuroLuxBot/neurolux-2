@@ -84,7 +84,6 @@ async def main():
 
     last_media = {"video": None, "document": None, "photo": None}
 
-    # ✅ НОВЫЙ ТЕКСТ ДЛЯ КНОПКИ "Как правильно выложить видео?"
     FREE_RULES_NEW_TEXT = (
         "⏰ Время публикации:\n"
         "12:00 – 14:00\n"
@@ -98,8 +97,15 @@ async def main():
         "     Видео — это ставка."
     )
 
-    # ✅ ДОБАВКА после "Принято"
     ACCEPT_WAIT_LINE = "⏳ Ожидайте видео в ближайшее время.\n"
+
+    def material_request_text(day: int) -> str:
+        return (
+            f"Отправь исходник (День {day}):\n"
+            "1) *видео файлом* (лучше)\n"
+            "2) *подробное описание* (текстом одним сообщением)\n\n"
+            "Можно прислать в любом порядке — я подскажу, чего не хватает."
+        )
 
     async def notify_admin(text: str):
         try:
@@ -112,9 +118,9 @@ async def main():
         except Exception as e:
             logging.exception(f"Admin notify error: {e}")
 
-    async def forward_free_material_to_admin(user_id: int, username: str | None, video_id: str, desc: str):
+    async def forward_free_material_to_admin(day: int, user_id: int, username: str | None, video_id: str, desc: str):
         header = (
-            "📦 Free тест — исходник + описание\n"
+            f"📦 Free тест — День {day} — исходник + описание\n"
             f"User: {safe_username(username)} | id={user_id}\n\n"
             "📝 Описание:\n"
             f"{truncate(desc, 3500)}"
@@ -450,12 +456,8 @@ async def main():
         goal = c.data.split("free:goal:", 1)[1]
         db.update_test_field(c.from_user.id, "goal", goal)
         await state.set_state(FreeTestFlow.material)
-        await c.message.answer(
-            "Отправь исходник:\n"
-            "1) *видео файлом* (лучше)\n"
-            "2) *подробное описание* (текстом одним сообщением)\n\n"
-            "Можно прислать в любом порядке — я подскажу, чего не хватает."
-        )
+        day = db.get_test_day(c.from_user.id)
+        await c.message.answer(material_request_text(day))
         await c.answer()
 
     @dp.message(FreeTestFlow.goal)
@@ -465,13 +467,10 @@ async def main():
             return await m.answer("Напиши цель теста *текстом* одним сообщением.")
         db.update_test_field(m.from_user.id, "goal", txt)
         await state.set_state(FreeTestFlow.material)
-        await m.answer(
-            "Отправь исходник:\n"
-            "1) *видео файлом* (лучше)\n"
-            "2) *подробное описание* (текстом одним сообщением)\n\n"
-            "Можно прислать в любом порядке — я подскажу, чего не хватает."
-        )
+        day = db.get_test_day(m.from_user.id)
+        await m.answer(material_request_text(day))
 
+    # MATERIAL: собираем И видео, И описание (любой порядок), затем пересылаем админу
     @dp.message(FreeTestFlow.material)
     async def free_material(m: Message, state: FSMContext):
         if m.video:
@@ -499,19 +498,21 @@ async def main():
                 missing.append("📝 подробное описание текстом")
             return await m.answer("Осталось прислать: " + " + ".join(missing))
 
+        day = db.get_test_day(m.from_user.id)
+
+        # сохраняем в БД (как и раньше: video file_id в material_value)
         db.update_test_field(m.from_user.id, "material_type", "video+description")
         db.update_test_field(m.from_user.id, "material_value", vid)
 
-        db.set_test_day(m.from_user.id, 1)
-
+        # пересылаем админу видео + описание
         try:
-            await forward_free_material_to_admin(m.from_user.id, m.from_user.username, vid, desc)
+            await forward_free_material_to_admin(day, m.from_user.id, m.from_user.username, vid, desc)
         except Exception as e:
             logging.exception(f"Forward to admin failed: {e}")
 
         last = db.get_last_test_fields(m.from_user.id)
         await notify_admin(
-            "📥 Free тест: исходник + описание приняты\n"
+            f"📥 Free тест: День {day} — исходник + описание приняты\n"
             f"User: {safe_username(m.from_user.username)} | id={m.from_user.id}\n"
             f"Niche: {last.get('niche','—')}\n"
             f"TikTok: {last.get('tiktok_link','—')}\n"
@@ -523,8 +524,8 @@ async def main():
         await m.answer(
             "✅ Принято.\n"
             f"{ACCEPT_WAIT_LINE}"
-            "*День 1* стартовал.\n"
-            "Видео №1 — тестируем хук и удержание.\n"
+            f"*День {day}* стартовал.\n"
+            "Видео — тестируем хук и удержание.\n"
             "Выложи в течение 24 часов.",
             reply_markup=kb.day_actions_kb()
         )
@@ -534,7 +535,6 @@ async def main():
         await c.message.answer(FREE_RULES_NEW_TEXT, parse_mode=None)
         await c.answer()
 
-    # Тут уже не "принято", поэтому не меняем
     @dp.callback_query(F.data == "free:posted")
     async def free_posted(c: CallbackQuery, state: FSMContext):
         day = db.get_test_day(c.from_user.id)
@@ -621,15 +621,18 @@ async def main():
         )
 
         if day < 3:
-            db.set_test_day(m.from_user.id, day + 1)
+            # Переходим на следующий день и снова просим ИСХОДНИК+ОПИСАНИЕ
+            next_day = day + 1
+            db.set_test_day(m.from_user.id, next_day)
+
             await state.clear()
+            await state.set_state(FreeTestFlow.material)
             await m.answer(
                 f"✅ Сохранили статистику (День {day}).\n\n"
-                f"*День {day+1}* стартовал.\n"
-                "Новое видео — следующая вариация формата/хука.\n"
-                "Выложи в течение 24 часов.",
-                reply_markup=kb.day_actions_kb()
+                f"*День {next_day}*.\n"
+                "Теперь пришли исходник и подробное описание для следующего видео:",
             )
+            await m.answer(material_request_text(next_day))
         else:
             db.finish_test(m.from_user.id)
             await state.clear()
