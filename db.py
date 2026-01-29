@@ -3,17 +3,19 @@ import sqlite3
 from typing import Optional, Any, List, Tuple
 
 # Must-have: persistent DB path for Railway Volume
-# Если volume /data не подключен — используем локальный файл, чтобы бот не падал.
 DEFAULT_DB_PATH = os.getenv("DB_PATH", "/data/neurolux.db")
 FALLBACK_DB_PATH = "neurolux.db"
 
 # Разрешенные поля для безопасного update_test_field
+# ✅ ДОБАВЛЕНО: material_video_id, material_description
 ALLOWED_TEST_FIELDS = {
     "niche",
     "tiktok_link",
     "goal",
     "material_type",
     "material_value",
+    "material_video_id",
+    "material_description",
     "day",
     "is_done",
 }
@@ -22,7 +24,6 @@ _conn: Optional[sqlite3.Connection] = None
 
 
 def _ensure_dir_for(path: str) -> None:
-    # создаём папку только для абсолютных путей (например /data/...)
     if os.path.isabs(path):
         d = os.path.dirname(path)
         if d and not os.path.exists(d):
@@ -34,7 +35,6 @@ def connect() -> sqlite3.Connection:
     if _conn is not None:
         return _conn
 
-    # Пытаемся открыть /data/neurolux.db; если не получилось — локальный файл.
     try:
         _ensure_dir_for(DEFAULT_DB_PATH)
         _conn = sqlite3.connect(DEFAULT_DB_PATH, check_same_thread=False)
@@ -43,7 +43,6 @@ def connect() -> sqlite3.Connection:
 
     _conn.row_factory = sqlite3.Row
 
-    # Небольшие прагмы для стабильности
     try:
         _conn.execute("PRAGMA journal_mode=WAL;")
         _conn.execute("PRAGMA foreign_keys=ON;")
@@ -51,6 +50,27 @@ def connect() -> sqlite3.Connection:
         pass
 
     return _conn
+
+
+def _column_exists(con: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = con.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(r["name"] == column for r in rows)
+
+
+def _ensure_free_tests_columns(con: sqlite3.Connection) -> None:
+    """
+    ✅ Мягкая миграция: добавляет недостающие колонки в free_tests,
+    чтобы не ломать уже существующую БД.
+    """
+    try:
+        if not _column_exists(con, "free_tests", "material_video_id"):
+            con.execute("ALTER TABLE free_tests ADD COLUMN material_video_id TEXT;")
+        if not _column_exists(con, "free_tests", "material_description"):
+            con.execute("ALTER TABLE free_tests ADD COLUMN material_description TEXT;")
+        con.commit()
+    except Exception:
+        # если таблицы ещё нет или ALTER не прошёл — просто пропускаем
+        pass
 
 
 def init_db() -> None:
@@ -64,6 +84,7 @@ def init_db() -> None:
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )""")
 
+    # ✅ ДОБАВЛЕНО в схему: material_video_id, material_description
     cur.execute("""
     CREATE TABLE IF NOT EXISTS free_tests (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,6 +94,8 @@ def init_db() -> None:
         goal TEXT,
         material_type TEXT,
         material_value TEXT,
+        material_video_id TEXT,
+        material_description TEXT,
         day INTEGER DEFAULT 1,
         is_done INTEGER DEFAULT 0,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -102,6 +125,9 @@ def init_db() -> None:
 
     con.commit()
 
+    # ✅ Миграция для старых БД
+    _ensure_free_tests_columns(con)
+
 
 def upsert_user(user_id: int, username: Optional[str]) -> None:
     con = connect()
@@ -113,7 +139,6 @@ def upsert_user(user_id: int, username: Optional[str]) -> None:
 
 def start_free_test(user_id: int) -> None:
     con = connect()
-    # Закрываем предыдущие незавершённые тесты пользователя
     con.execute("UPDATE free_tests SET is_done=1 WHERE user_id=? AND is_done=0", (user_id,))
     con.execute("INSERT INTO free_tests(user_id) VALUES (?)", (user_id,))
     con.commit()
@@ -129,7 +154,6 @@ def get_active_test_id(user_id: int) -> Optional[int]:
 
 
 def update_test_field(user_id: int, field: str, value: Any) -> None:
-    # MUST-HAVE: защита от SQL-инъекций и ошибок в названии поля
     if field not in ALLOWED_TEST_FIELDS:
         return
 
@@ -138,7 +162,6 @@ def update_test_field(user_id: int, field: str, value: Any) -> None:
         return
 
     con = connect()
-    # безопасно: поле из whitelist, значение параметром
     con.execute(f"UPDATE free_tests SET {field}=? WHERE id=?", (value, test_id))
     con.commit()
 
@@ -170,7 +193,8 @@ def get_last_test_fields(user_id: int) -> dict:
     con = connect()
     row = con.execute(
         """
-        SELECT id, niche, tiktok_link, goal
+        SELECT id, niche, tiktok_link, goal,
+               material_type, material_value, material_video_id, material_description
         FROM free_tests
         WHERE user_id=?
         ORDER BY id DESC
@@ -187,13 +211,17 @@ def get_last_test_fields(user_id: int) -> dict:
         "niche": row["niche"],
         "tiktok_link": row["tiktok_link"],
         "goal": row["goal"],
+        # ✅ полезно для админ-уведомлений/логов
+        "material_type": row["material_type"],
+        "material_value": row["material_value"],
+        "material_video_id": row["material_video_id"],
+        "material_description": row["material_description"],
     }
 
 
 def add_stats(user_id: int, day: int, post_link: str, views: int, likes: int, comments: int, follows: int) -> None:
     test_id = get_active_test_id(user_id)
 
-    # Если активного теста нет — пытаемся взять последний
     if not test_id:
         con = connect()
         row = con.execute(
@@ -234,7 +262,6 @@ def get_stats_for_last_test(user_id: int) -> List[Tuple]:
         (user_id, test_id),
     ).fetchall()
 
-    # Возвращаем как список tuple, чтобы твой make_test_report точно не сломался
     return [tuple(r) for r in rows]
 
 
