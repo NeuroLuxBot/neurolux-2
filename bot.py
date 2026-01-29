@@ -98,6 +98,9 @@ async def main():
         "     Видео — это ставка."
     )
 
+    # ✅ ДОБАВКА после "Принято"
+    ACCEPT_WAIT_LINE = "⏳ Ожидайте видео в ближайшее время.\n"
+
     async def notify_admin(text: str):
         try:
             await bot.send_message(
@@ -175,18 +178,15 @@ async def main():
             return await m.answer("Формат: ответь командой /getid на сообщение с видео/фото/файлом.")
 
         if r.video:
-            x = r.video
-            last_media["video"] = x.file_id
+            last_media["video"] = r.video.file_id
             return await m.answer("✅ LAST VIDEO обновлён.")
 
         if r.document:
-            x = r.document
-            last_media["document"] = x.file_id
+            last_media["document"] = r.document.file_id
             return await m.answer("✅ LAST DOC обновлён.")
 
         if r.photo:
-            x = r.photo[-1]
-            last_media["photo"] = x.file_id
+            last_media["photo"] = r.photo[-1].file_id
             return await m.answer("✅ LAST PHOTO обновлён.")
 
         return await m.answer("В reply нет видео/фото/файла.")
@@ -499,14 +499,11 @@ async def main():
                 missing.append("📝 подробное описание текстом")
             return await m.answer("Осталось прислать: " + " + ".join(missing))
 
-        # ВАЖНО: в твоём db.py сейчас нет полей material_video_id/material_description.
-        # Поэтому сохраняем в существующие поля:
         db.update_test_field(m.from_user.id, "material_type", "video+description")
-        db.update_test_field(m.from_user.id, "material_value", vid)  # file_id видео
+        db.update_test_field(m.from_user.id, "material_value", vid)
 
         db.set_test_day(m.from_user.id, 1)
 
-        # Пересылаем тебе в личку видео + описание
         try:
             await forward_free_material_to_admin(m.from_user.id, m.from_user.username, vid, desc)
         except Exception as e:
@@ -524,18 +521,20 @@ async def main():
 
         await state.clear()
         await m.answer(
-            "✅ Принято. *День 1* стартовал.\n"
+            "✅ Принято.\n"
+            f"{ACCEPT_WAIT_LINE}"
+            "*День 1* стартовал.\n"
             "Видео №1 — тестируем хук и удержание.\n"
             "Выложи в течение 24 часов.",
             reply_markup=kb.day_actions_kb()
         )
 
-    # ✅ ИСПРАВЛЕНО: кнопка "Как правильно выложить видео?" теперь отдаёт твой новый текст
     @dp.callback_query(F.data == "free:rules")
     async def free_rules(c: CallbackQuery):
         await c.message.answer(FREE_RULES_NEW_TEXT, parse_mode=None)
         await c.answer()
 
+    # Тут уже не "принято", поэтому не меняем
     @dp.callback_query(F.data == "free:posted")
     async def free_posted(c: CallbackQuery, state: FSMContext):
         day = db.get_test_day(c.from_user.id)
