@@ -84,6 +84,20 @@ async def main():
 
     last_media = {"video": None, "document": None, "photo": None}
 
+    # ✅ НОВЫЙ ТЕКСТ ДЛЯ КНОПКИ "Как правильно выложить видео?"
+    FREE_RULES_NEW_TEXT = (
+        "⏰ Время публикации:\n"
+        "12:00 – 14:00\n"
+        "18:00 – 22:00\n\n"
+        "📊 Сколько выкладывать:\n"
+        "ежедневно\n"
+        "минимум 30 дней\n"
+        "90% аккаунтов не растут из-за нерегулярности.\n\n"
+        "🚀 Алгоритм = игровой автомат\n"
+        "     Ты — игрок.\n"
+        "     Видео — это ставка."
+    )
+
     async def notify_admin(text: str):
         try:
             await bot.send_message(
@@ -96,20 +110,13 @@ async def main():
             logging.exception(f"Admin notify error: {e}")
 
     async def forward_free_material_to_admin(user_id: int, username: str | None, video_id: str, desc: str):
-        """
-        Шлёт тебе в личку:
-        1) карточку с данными пользователя + описание
-        2) само видео (как файл/видео по file_id)
-        """
         header = (
             "📦 Free тест — исходник + описание\n"
             f"User: {safe_username(username)} | id={user_id}\n\n"
             "📝 Описание:\n"
             f"{truncate(desc, 3500)}"
         )
-        # 1) текст
         await bot.send_message(ADMIN_ID, header, parse_mode=None, disable_web_page_preview=True)
-        # 2) видео
         await bot.send_video(ADMIN_ID, video_id)
 
     @dp.error()
@@ -465,7 +472,6 @@ async def main():
             "Можно прислать в любом порядке — я подскажу, чего не хватает."
         )
 
-    # MATERIAL: собираем И видео, И описание (любой порядок), затем пересылаем админу
     @dp.message(FreeTestFlow.material)
     async def free_material(m: Message, state: FSMContext):
         if m.video:
@@ -493,18 +499,17 @@ async def main():
                 missing.append("📝 подробное описание текстом")
             return await m.answer("Осталось прислать: " + " + ".join(missing))
 
-        # сохраняем в БД
+        # ВАЖНО: в твоём db.py сейчас нет полей material_video_id/material_description.
+        # Поэтому сохраняем в существующие поля:
         db.update_test_field(m.from_user.id, "material_type", "video+description")
-        db.update_test_field(m.from_user.id, "material_video_id", vid)
-        db.update_test_field(m.from_user.id, "material_description", desc)
+        db.update_test_field(m.from_user.id, "material_value", vid)  # file_id видео
 
         db.set_test_day(m.from_user.id, 1)
 
-        # ✅ ВАЖНО: пересылаем тебе в личку и видео, и описание
+        # Пересылаем тебе в личку видео + описание
         try:
             await forward_free_material_to_admin(m.from_user.id, m.from_user.username, vid, desc)
         except Exception as e:
-            # покажем пользователю, что приняли, но админу не дошло (ошибка будет в логах)
             logging.exception(f"Forward to admin failed: {e}")
 
         last = db.get_last_test_fields(m.from_user.id)
@@ -525,9 +530,10 @@ async def main():
             reply_markup=kb.day_actions_kb()
         )
 
+    # ✅ ИСПРАВЛЕНО: кнопка "Как правильно выложить видео?" теперь отдаёт твой новый текст
     @dp.callback_query(F.data == "free:rules")
     async def free_rules(c: CallbackQuery):
-        await c.message.answer(texts.FREE_RULES_MINI)
+        await c.message.answer(FREE_RULES_NEW_TEXT, parse_mode=None)
         await c.answer()
 
     @dp.callback_query(F.data == "free:posted")
@@ -645,7 +651,6 @@ async def main():
             await m.answer(report)
             await m.answer(texts.AFTER_TEST_SUMMARY, reply_markup=kb.after_test_kb(cfg.manager_username))
 
-    # FSM fallback
     @dp.message(StateFilter("*"))
     async def fsm_fallback(m: Message, state: FSMContext):
         if await state.get_state() is None:
